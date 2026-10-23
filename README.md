@@ -1,5 +1,7 @@
 # AgentAudit
 
+[![tests](https://github.com/ektabadiyani/agentaudit/actions/workflows/tests.yml/badge.svg)](https://github.com/ektabadiyani/agentaudit/actions/workflows/tests.yml)
+
 **Measure how accurate an AI support agent really is, graded against its own help centre.**
 
 Most AI support dashboards report *deflection*: the share of conversations the bot handled without a human. Deflection counts a confidently wrong answer as a success. AgentAudit grades every AI answer against the company's help-centre articles and reports how often the agent was actually right, with an honest margin of error and a measured check on whether the AI grader itself can be trusted.
@@ -60,6 +62,8 @@ A handoff to a human is `correct` when the help centre says the request needs st
 - **Precedence is explicit.** Ordering the verdicts removes the most common source of grader inconsistency: answers that are both incomplete and partly wrong.
 - **Failures don't stop a run.** An API error or refusal on one conversation is recorded and the run continues; re-running the same command resumes and grades only what's missing. A bad API key stops the run immediately.
 - **Caching keeps cost flat.** The help centre is a cached prompt prefix, so each additional grade pays full price only for the question and answer.
+- **No surprise bills.** `grade` estimates the cost and asks before sending anything; `estimate` does the same calculation without grading.
+- **Personal data stays home.** Emails, phone numbers, card numbers, national ID numbers and IP addresses are replaced with placeholders before any conversation is sent for grading.
 
 ## Quick start
 
@@ -69,7 +73,12 @@ Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/), plus an Anthropic AP
 uv sync
 export ANTHROPIC_API_KEY=...        # or: ant auth login
 
-# Grade the sample conversations (try --limit 3 first)
+# See what grading would cost (no API calls)
+uv run agentaudit estimate \
+  --kb data/sample/help_center \
+  --conversations data/sample/conversations.jsonl
+
+# Grade the sample conversations (try --limit 3 first). Shows the estimate and asks before spending.
 uv run agentaudit grade \
   --kb data/sample/help_center \
   --conversations data/sample/conversations.jsonl \
@@ -83,9 +92,42 @@ uv run agentaudit report \
   --out runs/sample/report.md
 ```
 
-Options for `grade`: `--model` (default `claude-opus-5-5`), `--effort` (`low` to `max`, default `medium`), `--workers` (parallel requests, default 4), `--limit`.
+Options for `grade`: `--model` (default `claude-opus-5-5`), `--effort` (`low` to `max`, default `medium`), `--workers` (parallel requests, default 4), `--limit`, `--yes` (skip the cost prompt), `--no-redact`.
 
-Cost depends on the size of the help centre and the effort level. For the sample (10 articles, 34 conversations) expect well under a few US dollars; check the usage page in the Anthropic Console after your first run for an exact figure.
+Cost depends on the size of the help centre and the effort level. For the sample (10 articles, 34 conversations) `estimate` gives roughly $0.24–$1.29 at the default settings. Token counts are approximated offline, so check the usage page in the Anthropic Console after a first run for exact figures.
+
+## Pulling from Zendesk
+
+`pull-zendesk` downloads published help-centre articles and AI-handled tickets into the same layout as the sample data, so `estimate`, `grade` and `report` work on it unchanged.
+
+```bash
+export ZENDESK_SUBDOMAIN=acme            # the "acme" in acme.zendesk.com
+export ZENDESK_EMAIL=you@acme.com
+export ZENDESK_API_TOKEN=...             # Admin Center › Apps and integrations › APIs › Zendesk API
+
+uv run agentaudit pull-zendesk --out data/acme \
+  --ai-author-id 123456789 \
+  --ai-tag ai_agent \
+  --since 2026-09-01
+```
+
+| Option | Meaning |
+|---|---|
+| `--ai-author-id` | The Zendesk user the AI agent posts as. Repeat for several bots. Required. |
+| `--ai-tag` | Only tickets with this tag (most AI agents tag the tickets they touch) |
+| `--since` | Tickets created on or after this date (default: last 30 days) |
+| `--topic-tag-prefix` | Tags like `topic_billing` become the topic `billing` (default prefix `topic_`) |
+| `--limit`, `--locale`, `--skip-articles`, `--no-redact` | As named |
+
+How a ticket becomes a conversation:
+
+- **Question:** the requester's public comments before the AI first replied.
+- **AI answer:** the AI's public replies before any human agent replied. Anything the AI said after a human stepped in is left out, because it was no longer handling the conversation alone.
+- **Handed off:** a human agent replied publicly.
+- **Reopened:** the ticket's metrics show a reopen. Zendesk doesn't record when, so any reopen counts.
+- **CSAT:** "good" becomes 5 and "bad" becomes 1.
+
+Tickets with no AI reply, or no customer question before it, are skipped and counted. The API token is read only from the environment so it never lands in shell history, rate limits are retried using Zendesk's `Retry-After` header, and the client refuses to follow pagination links to any host other than your Zendesk.
 
 ## Input formats
 
@@ -114,20 +156,22 @@ No real customer or employer data is included. Regenerate the sample with `uv ru
 uv run pytest
 ```
 
-Tests run offline against a fake API client and cover the statistics, the grader's request shape and error handling, and the report.
+Tests run offline, with no API key or Zendesk account, against fake Claude and Zendesk clients. They cover the statistics, the grader's request shape and error handling, the report, the Zendesk connector (pagination, ticket mapping, rate limits, credentials), personal-data removal, cost estimates, and the rule that `grade` never calls the API without confirmation. GitHub Actions runs them on every push.
 
 ## Limitations
 
 - **Accuracy is measured against the help centre, not reality.** If an article is out of date, an answer that matches it is graded correct.
 - **Verified resolution is an upper bound.** It relies on the reopen flag; customers who give up without reopening count as resolved.
 - **An AI grader can be wrong.** That is why the agreement check exists. Don't rely on the numbers until kappa on a human-graded sample is at least "substantial" (above 0.6).
+- **Personal-data removal is pattern-based.** It catches structured identifiers, not names or street addresses written in free text.
 - **The whole help centre goes in every prompt.** That suits help centres up to a few hundred articles; larger ones need retrieval to select relevant articles first.
 
 ## Roadmap
 
-- [ ] Zendesk connector: pull AI-handled conversations and help-centre articles directly via the Zendesk API
-- [ ] Remove customer personal details before anything is sent for grading
-- [ ] Re-run automatically when help articles change (GitHub Actions)
+- [x] Zendesk connector: pull AI-handled conversations and help-centre articles directly via the Zendesk API
+- [x] Remove customer personal details before anything is sent for grading
+- [x] Cost estimate and confirmation before any API spend
+- [ ] Re-run the audit automatically when help articles change (GitHub Actions)
 - [ ] Salesforce Service Cloud connector
 - [ ] Retrieval for large help centres
 - [ ] Web app: connect a helpdesk, run an audit, share the report
